@@ -4,9 +4,6 @@ from playwright.sync_api import Page, FrameLocator
 
 
 def get_preview_frame(page: Page, logger=None) -> FrameLocator:
-    """
-    获取预览iframe的FrameLocator。
-    """
     try:
         frame = page.frame_locator('iframe[title="Preview"]')
         return frame
@@ -17,15 +14,10 @@ def get_preview_frame(page: Page, logger=None) -> FrameLocator:
 
 
 def get_ws_status(page: Page, logger=None) -> str:
-    """
-    获取页面中WS连接状态（在iframe内部）。
-    返回: CONNECTED, IDLE, CONNECTING 或 UNKNOWN
-    """
     try:
         frame = get_preview_frame(page, logger)
         if not frame:
             return "UNKNOWN"
-
         status_element = frame.locator('text=/WS:\\s*(CONNECTED|IDLE|CONNECTING)/i').first
         if status_element.is_visible(timeout=3000):
             text = status_element.text_content()
@@ -44,14 +36,10 @@ def get_ws_status(page: Page, logger=None) -> str:
 
 
 def click_disconnect(page: Page, logger=None) -> bool:
-    """
-    点击Disconnect按钮断开WS连接（在iframe内部）。
-    """
     try:
         frame = get_preview_frame(page, logger)
         if not frame:
             return False
-
         disconnect_btn = frame.locator('button:has-text("Disconnect")')
         if disconnect_btn.count() > 0 and disconnect_btn.first.is_visible(timeout=3000):
             disconnect_btn.first.click(timeout=5000)
@@ -69,14 +57,10 @@ def click_disconnect(page: Page, logger=None) -> bool:
 
 
 def click_connect(page: Page, logger=None) -> bool:
-    """
-    点击Connect按钮建立WS连接（在iframe内部）。
-    """
     try:
         frame = get_preview_frame(page, logger)
         if not frame:
             return False
-
         connect_btn = frame.locator('button:has-text("Connect")')
         if connect_btn.count() > 0 and connect_btn.first.is_visible(timeout=3000):
             connect_btn.first.click(timeout=5000)
@@ -94,9 +78,6 @@ def click_connect(page: Page, logger=None) -> bool:
 
 
 def wait_for_ws_connected(page: Page, logger=None, timeout: int = 30) -> bool:
-    """
-    等待WS状态变为CONNECTED。
-    """
     start_time = time.time()
     while time.time() - start_time < timeout:
         status = get_ws_status(page, logger)
@@ -107,23 +88,16 @@ def wait_for_ws_connected(page: Page, logger=None, timeout: int = 30) -> bool:
 
 
 def reconnect_ws(page: Page, logger=None) -> str:
-    """
-    执行断开再连接的流程，并返回最终WS状态。
-    """
     if logger:
         logger.info("开始执行WS重连流程: Disconnect -> Connect")
-
     dismiss_interaction_modal(page, logger)
     click_disconnect(page, logger)
     time.sleep(2)
-
     status = get_ws_status(page, logger)
     if logger:
         logger.info(f"断开后WS状态: {status}")
-
     click_connect(page, logger)
     time.sleep(2)
-
     if wait_for_ws_connected(page, logger, timeout=15):
         status = get_ws_status(page, logger)
         if logger:
@@ -137,10 +111,6 @@ def reconnect_ws(page: Page, logger=None) -> str:
 
 
 def dismiss_interaction_modal(page: Page, logger=None) -> bool:
-    """
-    检测并关闭 interaction-modal 遮罩层。
-    策略：JavaScript点击 -> 鼠标移动 -> 点击iframe区域 -> 点击遮罩自身，逐级升级。
-    """
     try:
         modal = page.locator('div.interaction-modal')
         if modal.count() == 0 or not modal.first.is_visible(timeout=500):
@@ -149,21 +119,26 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
         if logger:
             logger.info("检测到 interaction-modal 遮罩层，尝试关闭...")
 
-        # 第零步：先尝试用 JavaScript 直接移除遮罩（最可靠）
+        # 第零步：JavaScript 移除遮罩 + 模拟点击触发 WS 连接
         try:
             removed = page.evaluate("""
                 () => {
                     const modal = document.querySelector('div.interaction-modal');
-                    if (modal) {
-                        modal.remove();
-                        return true;
-                    }
+                    if (modal) { modal.remove(); return true; }
                     return false;
                 }
             """)
             if removed:
                 if logger:
-                    logger.info("已通过 JavaScript 移除 interaction-modal 遮罩层")
+                    logger.info("已通过 JavaScript 移除 interaction-modal 遮罩层，准备模拟点击触发WS...")
+                time.sleep(0.5)
+                # 多次模拟点击触发 WebSocket 连接
+                page.mouse.click(640, 400)
+                time.sleep(0.5)
+                page.mouse.click(640, 400)
+                time.sleep(1)
+                if logger:
+                    logger.info("已模拟点击触发 WS 连接")
                 return True
         except Exception as js_e:
             if logger:
@@ -184,7 +159,6 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                 curr_x = iframe_box['x'] + random.randint(50, int(iframe_box['width']) - 50)
                 curr_y = iframe_box['y'] + random.randint(50, int(iframe_box['height']) - 50)
 
-                # 鼠标移动（10次）
                 for i in range(10):
                     delta_x = random.randint(-30, 30)
                     delta_y = random.randint(-20, 20)
@@ -210,7 +184,6 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                     return True
 
             else:
-                # iframe 存在但 bounding_box 为 None，说明未渲染，等待后重试
                 if logger:
                     logger.info("iframe bounding_box 为 None，等待渲染后重试...")
                 time.sleep(2)
@@ -246,7 +219,7 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
         except Exception:
             pass
 
-        # 第四步：再次尝试 JavaScript 强制隐藏（display:none）
+        # 第四步：JavaScript 强制隐藏
         try:
             page.evaluate("""
                 () => {
@@ -259,6 +232,9 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                 }
             """)
             time.sleep(0.3)
+            # 隐藏后同样模拟点击触发 WS
+            page.mouse.click(640, 400)
+            time.sleep(1)
             if modal.count() == 0 or not modal.first.is_visible(timeout=500):
                 if logger:
                     logger.info("已通过 JavaScript 隐藏 interaction-modal 遮罩层")
@@ -278,30 +254,21 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
 
 
 def click_in_iframe(page: Page, logger=None) -> bool:
-    """
-    在 iframe 内随机移动鼠标并点击一次，用于保活。
-    避开顶部（状态栏和按钮区域）和右侧区域。
-    """
     try:
         iframe = page.locator('iframe[title="Preview"]')
         if iframe.count() == 0:
             return False
-
         iframe_box = iframe.first.bounding_box()
         if not iframe_box:
             return False
-
         safe_left = iframe_box['x'] + 50
         safe_right = iframe_box['x'] + iframe_box['width'] - 200
         safe_top = iframe_box['y'] + 80
         safe_bottom = iframe_box['y'] + iframe_box['height'] - 50
-
         if safe_right <= safe_left or safe_bottom <= safe_top:
             return False
-
         curr_x = random.randint(int(safe_left), int(safe_right))
         curr_y = random.randint(int(safe_top), int(safe_bottom))
-
         for _ in range(random.randint(3, 6)):
             delta_x = random.randint(-30, 30)
             delta_y = random.randint(-20, 20)
@@ -309,10 +276,8 @@ def click_in_iframe(page: Page, logger=None) -> bool:
             curr_y = max(int(safe_top), min(int(safe_bottom), curr_y + delta_y))
             page.mouse.move(curr_x, curr_y)
             time.sleep(0.05)
-
         page.mouse.click(curr_x, curr_y)
         return True
-
     except Exception as e:
         if logger:
             logger.debug(f"在 iframe 内点击失败: {e}")
