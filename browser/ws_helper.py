@@ -109,7 +109,6 @@ def wait_for_ws_connected(page: Page, logger=None, timeout: int = 30) -> bool:
 def reconnect_ws(page: Page, logger=None) -> str:
     """
     执行断开再连接的流程，并返回最终WS状态。
-    流程：关闭遮罩 -> Disconnect -> 等待IDLE -> Connect -> 等待CONNECTED -> 获取状态
     """
     if logger:
         logger.info("开始执行WS重连流程: Disconnect -> Connect")
@@ -140,9 +139,7 @@ def reconnect_ws(page: Page, logger=None) -> str:
 def dismiss_interaction_modal(page: Page, logger=None) -> bool:
     """
     检测并关闭 interaction-modal 遮罩层。
-    策略：鼠标移动 -> 点击iframe区域 -> 点击遮罩自身，逐级升级。
-
-    返回: True 如果成功关闭遮罩，False 如果未找到遮罩或关闭失败
+    策略：JavaScript点击 -> 鼠标移动 -> 点击iframe区域 -> 点击遮罩自身，逐级升级。
     """
     try:
         modal = page.locator('div.interaction-modal')
@@ -152,14 +149,42 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
         if logger:
             logger.info("检测到 interaction-modal 遮罩层，尝试关闭...")
 
+        # 第零步：先尝试用 JavaScript 直接移除遮罩（最可靠）
+        try:
+            removed = page.evaluate("""
+                () => {
+                    const modal = document.querySelector('div.interaction-modal');
+                    if (modal) {
+                        modal.remove();
+                        return true;
+                    }
+                    return false;
+                }
+            """)
+            if removed:
+                if logger:
+                    logger.info("已通过 JavaScript 移除 interaction-modal 遮罩层")
+                return True
+        except Exception as js_e:
+            if logger:
+                logger.debug(f"JavaScript 移除遮罩失败: {js_e}")
+
+        # 第一步：检查 iframe 状态并尝试鼠标操作
         iframe = page.locator('iframe[title="Preview"]')
-        if iframe.count() > 0:
+        iframe_count = iframe.count()
+        if logger:
+            logger.info(f"iframe 数量: {iframe_count}")
+
+        if iframe_count > 0:
             iframe_box = iframe.first.bounding_box()
+            if logger:
+                logger.info(f"iframe bounding_box: {iframe_box}")
+
             if iframe_box:
                 curr_x = iframe_box['x'] + random.randint(50, int(iframe_box['width']) - 50)
                 curr_y = iframe_box['y'] + random.randint(50, int(iframe_box['height']) - 50)
 
-                # 第一步：鼠标移动（最多10次，原版30次效率太低）
+                # 鼠标移动（10次）
                 for i in range(10):
                     delta_x = random.randint(-30, 30)
                     delta_y = random.randint(-20, 20)
@@ -174,7 +199,7 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                             logger.info("已通过鼠标移动关闭 interaction-modal 遮罩层")
                         return True
 
-                # 第二步：移动无效，直接点击 iframe 区域
+                # 第二步：直接点击 iframe 区域
                 if logger:
                     logger.info("鼠标移动无效，尝试直接点击关闭 interaction-modal...")
                 page.mouse.click(curr_x, curr_y)
@@ -184,26 +209,66 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                         logger.info("已通过点击 iframe 区域关闭 interaction-modal 遮罩层")
                     return True
 
-                # 第三步：点击遮罩自身（部分弹窗点击自身即可关闭）
-                try:
-                    modal_box = modal.first.bounding_box()
-                    if modal_box:
+            else:
+                # iframe 存在但 bounding_box 为 None，说明未渲染，等待后重试
+                if logger:
+                    logger.info("iframe bounding_box 为 None，等待渲染后重试...")
+                time.sleep(2)
+                iframe_box = iframe.first.bounding_box()
+                if logger:
+                    logger.info(f"重试后 iframe bounding_box: {iframe_box}")
+                if iframe_box:
+                    page.mouse.click(
+                        iframe_box['x'] + iframe_box['width'] / 2,
+                        iframe_box['y'] + iframe_box['height'] / 2
+                    )
+                    time.sleep(0.5)
+                    if modal.count() == 0 or not modal.first.is_visible(timeout=500):
                         if logger:
-                            logger.info("尝试点击遮罩自身关闭 interaction-modal...")
-                        page.mouse.click(
-                            modal_box['x'] + modal_box['width'] / 2,
-                            modal_box['y'] + modal_box['height'] / 2
-                        )
-                        time.sleep(0.5)
-                        if modal.count() == 0 or not modal.first.is_visible(timeout=500):
-                            if logger:
-                                logger.info("已通过点击遮罩自身关闭 interaction-modal")
-                            return True
-                except Exception:
-                    pass
+                            logger.info("等待渲染后点击成功关闭 interaction-modal")
+                        return True
+
+        # 第三步：点击遮罩自身
+        try:
+            modal_box = modal.first.bounding_box()
+            if logger:
+                logger.info(f"尝试点击遮罩自身，bounding_box: {modal_box}")
+            if modal_box:
+                page.mouse.click(
+                    modal_box['x'] + modal_box['width'] / 2,
+                    modal_box['y'] + modal_box['height'] / 2
+                )
+                time.sleep(0.5)
+                if modal.count() == 0 or not modal.first.is_visible(timeout=500):
+                    if logger:
+                        logger.info("已通过点击遮罩自身关闭 interaction-modal")
+                    return True
+        except Exception:
+            pass
+
+        # 第四步：再次尝试 JavaScript 强制隐藏（display:none）
+        try:
+            page.evaluate("""
+                () => {
+                    const modal = document.querySelector('div.interaction-modal');
+                    if (modal) {
+                        modal.style.display = 'none';
+                        modal.style.visibility = 'hidden';
+                        modal.style.pointerEvents = 'none';
+                    }
+                }
+            """)
+            time.sleep(0.3)
+            if modal.count() == 0 or not modal.first.is_visible(timeout=500):
+                if logger:
+                    logger.info("已通过 JavaScript 隐藏 interaction-modal 遮罩层")
+                return True
+        except Exception as js_e:
+            if logger:
+                logger.debug(f"JavaScript 隐藏遮罩失败: {js_e}")
 
         if logger:
-            logger.warning("无法关闭 interaction-modal，将在下次循环重试")
+            logger.warning("所有方法均无法关闭 interaction-modal，将在下次循环重试")
         return False
 
     except Exception as e:
@@ -216,8 +281,6 @@ def click_in_iframe(page: Page, logger=None) -> bool:
     """
     在 iframe 内随机移动鼠标并点击一次，用于保活。
     避开顶部（状态栏和按钮区域）和右侧区域。
-
-    返回: True 如果成功点击，False 如果失败
     """
     try:
         iframe = page.locator('iframe[title="Preview"]')
