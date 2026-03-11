@@ -29,3 +29,4 @@ EXPOSE 7860
 
 # 设置容器启动时要执行的命令
 CMD ["python", "main.py"]
+# force rebuild 3
