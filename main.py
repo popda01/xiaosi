@@ -5,12 +5,10 @@ import signal
 import sys
 import time
 
-
-# 加载 .env 文件（仅在非 Docker 环境且文件存在时）
 def load_env_file():
     """加载 .env 文件，不影响已存在的环境变量"""
     if os.environ.get("DOCKER_ENV") or os.path.exists("/.dockerenv"):
-        return  # Docker 环境，跳过加载
+        return
     try:
         from dotenv import load_dotenv
         env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -18,7 +16,6 @@ def load_env_file():
             load_dotenv(env_path, override=False)
     except ImportError:
         pass
-
 
 load_env_file()
 
@@ -31,7 +28,6 @@ from utils.common import clean_env_value, ensure_dir
 # 全局变量
 app_running = False
 flask_app = None
-# 使用 multiprocessing.Event 实现跨进程通信
 shutdown_event = multiprocessing.Event()
 
 
@@ -39,22 +35,19 @@ class ProcessManager:
     """进程管理器，负责跟踪和管理浏览器进程"""
 
     def __init__(self):
-        self.processes = {}  # {process_id: process_info}
+        self.processes = {}
         self.lock = threading.RLock()
         ensure_dir(logs_dir())
         self.logger = setup_logging(str(logs_dir() / 'app.log'), prefix="manager")
 
     def add_process(self, process, config=None):
-        """添加进程到管理器"""
         with self.lock:
             pid = process.pid if process and hasattr(process, 'pid') else None
-
             if pid is None:
                 temp_id = f"temp_{len(self.processes)}"
                 self.logger.warning(f"进程PID暂时为None，使用临时ID {temp_id}")
             else:
                 temp_id = pid
-
             process_info = {
                 'process': process,
                 'config': config,
@@ -65,32 +58,26 @@ class ProcessManager:
             self.processes[temp_id] = process_info
 
     def update_temp_pids(self):
-        """更新临时PID为真实PID"""
         with self.lock:
             temp_ids = [k for k in self.processes.keys() if isinstance(k, str) and k.startswith("temp_")]
             for temp_id in temp_ids:
                 process_info = self.processes[temp_id]
                 process = process_info['process']
-
                 if process and hasattr(process, 'pid') and process.pid is not None:
                     self.processes[process.pid] = process_info
                     del self.processes[temp_id]
                     process_info['pid'] = process.pid
 
     def remove_process(self, pid):
-        """从管理器中移除进程"""
         with self.lock:
             if pid in self.processes:
                 del self.processes[pid]
 
     def get_alive_processes(self):
-        """获取所有存活进程"""
         with self.lock:
             self.update_temp_pids()
-
             alive = []
             dead_pids = []
-
             for pid, info in self.processes.items():
                 process = info['process']
                 try:
@@ -101,24 +88,17 @@ class ProcessManager:
                 except (ValueError, ProcessLookupError) as e:
                     dead_pids.append(pid)
                     self.logger.warning(f"进程 {pid} 检查时出错: {e}")
-
             for pid in dead_pids:
                 self.remove_process(pid)
-
             return alive
 
     def terminate_all(self, timeout=10):
-        """优雅地终止所有进程"""
         with self.lock:
             self.update_temp_pids()
-
             if not self.processes:
                 self.logger.info("没有活跃的进程需要关闭")
                 return
-
             self.logger.info(f"开始关闭 {len(self.processes)} 个进程...")
-
-            # 第一阶段：发送 SIGTERM
             active_pids = []
             for pid, info in list(self.processes.items()):
                 process = info['process']
@@ -133,12 +113,9 @@ class ProcessManager:
                         self.logger.info(f"进程 {pid if pid is not None else 'None'} 已经停止或无效")
                 except (ValueError, ProcessLookupError, AttributeError) as e:
                     self.logger.warning(f"进程 {pid if pid is not None else 'None'} 访问出错: {e}")
-
             if not active_pids:
                 self.logger.info("所有进程已经停止")
                 return
-
-            # 第二阶段：等待进程退出（最多 5 秒）
             self.logger.info(f"等待 {len(active_pids)} 个进程优雅退出...")
             start_wait = time.time()
             while time.time() - start_wait < 5:
@@ -155,10 +132,7 @@ class ProcessManager:
                     self.logger.info("所有进程已优雅退出")
                     return
                 time.sleep(0.5)
-
             self.logger.info(f"仍有 {len(still_alive)} 个进程在运行，准备强制关闭...")
-
-            # 第三阶段：强制 SIGKILL
             for pid in active_pids:
                 if pid in self.processes and pid is not None:
                     process = self.processes[pid]['process']
@@ -168,16 +142,13 @@ class ProcessManager:
                             process.kill()
                     except (ValueError, ProcessLookupError, AttributeError) as e:
                         self.logger.info(f"进程 {pid} 已终止: {e}")
-
             self.logger.info("所有进程关闭完成")
 
     def get_count(self):
-        """获取管理的进程总数"""
         with self.lock:
             return len(self.processes)
 
     def get_alive_count(self):
-        """获取存活进程数"""
         return len(self.get_alive_processes())
 
 
@@ -186,10 +157,6 @@ process_manager = ProcessManager()
 
 
 def load_instance_configurations(logger):
-    """
-    使用 CookieManager 解析环境变量和 Cookies 目录，
-    为每个 Cookie 来源创建独立的浏览器实例配置。
-    """
     shared_url = clean_env_value(os.getenv("CAMOUFOX_INSTANCE_URL"))
     if not shared_url:
         logger.error("错误: 缺少环境变量 CAMOUFOX_INSTANCE_URL。所有实例需要一个共享的目标URL")
@@ -227,12 +194,10 @@ def load_instance_configurations(logger):
             })
 
     logger.info(f"将启动 {len(instances)} 个浏览器实例")
-
     return global_settings, instances
 
 
 def start_browser_instances(run_mode="standalone"):
-    """启动浏览器实例的核心逻辑"""
     global app_running, process_manager, shutdown_event
 
     log_dir = logs_dir()
@@ -259,7 +224,6 @@ def start_browser_instances(run_mode="standalone"):
             continue
 
         cookie_source = final_config.get('cookie_source')
-
         if cookie_source:
             if cookie_source.type == "file":
                 logger.info(
@@ -283,8 +247,6 @@ def start_browser_instances(run_mode="standalone"):
         time.sleep(0.1)
         process_manager.add_process(process, final_config)
 
-        # [修复3] 将 time.sleep(start_delay) 改为可中断的等待，
-        # 避免关闭信号到来时主线程卡在 sleep 中无法响应
         deadline = time.time() + start_delay
         while time.time() < deadline:
             if not app_running or shutdown_event.is_set():
@@ -299,8 +261,8 @@ def start_browser_instances(run_mode="standalone"):
         while app_running and not shutdown_event.is_set():
             alive_processes = process_manager.get_alive_processes()
             current_count = len(alive_processes)
-
             now = time.time()
+
             if current_count != previous_count or now - last_log_time >= 600:
                 logger.info(f"当前运行的浏览器实例数: {current_count}")
                 previous_count = current_count
@@ -325,14 +287,12 @@ def start_browser_instances(run_mode="standalone"):
 
 
 def run_standalone_mode():
-    """独立模式"""
     global app_running
     app_running = True
     start_browser_instances(run_mode="standalone")
 
 
 def run_server_mode():
-    """服务器模式"""
     global app_running, flask_app
 
     log_dir = logs_dir()
@@ -347,18 +307,12 @@ def run_server_mode():
 
     app_running = True
 
-    # [修复1] 先定义所有路由，再启动后台线程和 Flask，
-    # 确保平台健康检查在任何时刻都能立即得到响应
-
     @flask_app.route('/')
     def index():
-        # [修复1] 零依赖路由，不调用任何可能阻塞的方法，
-        # 保证 Hugging Face 健康检查在启动瞬间就能收到 200
         return {"status": "ok", "mode": "server"}, 200
 
     @flask_app.route('/health')
     def health_check():
-        # [修复1] 用 try/except 包裹，防止锁竞争导致健康检查超时
         try:
             running_count = process_manager.get_alive_count()
             total_count = process_manager.get_count()
@@ -372,11 +326,10 @@ def run_server_mode():
             'message': f'Application is running with {running_count} active browser instances'
         })
 
-    # 禁用 Flask 的默认请求日志，减少日志噪音
     import logging
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-    # [修复1] 后台线程启动浏览器，完全不阻塞 Flask 主线程
+    # 后台线程启动浏览器
     browser_thread = threading.Thread(
         target=lambda: start_browser_instances(run_mode="server"),
         daemon=True
@@ -384,29 +337,40 @@ def run_server_mode():
     browser_thread.start()
     server_logger.info("浏览器后台线程已启动，Flask 即将开始监听 0.0.0.0:7860")
 
+    # 自我保活线程，防止 HuggingFace 因无流量休眠
+    import requests
+
+    def self_keepalive():
+        time.sleep(20)
+        while app_running:
+            try:
+                requests.get("http://127.0.0.1:7860/health", timeout=5)
+            except Exception:
+                pass
+            time.sleep(30)
+
+    keepalive_thread = threading.Thread(target=self_keepalive, daemon=True)
+    keepalive_thread.start()
+    server_logger.info("自我保活线程已启动")
+
     try:
-        # [修复1] threaded=True 确保每个请求在独立线程中处理，
-        # 彻底避免单个慢请求阻塞健康检查
         flask_app.run(host='0.0.0.0', port=7860, debug=False, threaded=True)
     except KeyboardInterrupt:
         server_logger.info("服务器正在关闭...")
 
 
 def signal_handler(signum, frame):
-    """统一的信号处理器 - 只有主进程应该执行这个逻辑"""
     global app_running, process_manager, shutdown_event
 
     logger = setup_logging(str(logs_dir() / 'app.log'), prefix="signal")
     logger.info(f"接收到信号 {signum}，开始处理...")
 
     current_pid = os.getpid()
-
     if multiprocessing.current_process().name != 'MainProcess':
         logger.info(f"子进程 {current_pid} 接收到信号 {signum}，忽略主进程信号处理逻辑")
         return
 
     logger.info(f"主进程 {current_pid} 接收到信号 {signum}，正在关闭应用...")
-
     app_running = False
 
     try:
@@ -425,11 +389,9 @@ def signal_handler(signum, frame):
 
 
 def main():
-    """主入口函数"""
     ensure_dir(logs_dir())
     ensure_dir(cookies_dir())
 
-    # 注册信号处理器
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     try:
@@ -441,12 +403,7 @@ def main():
     except (ValueError, AttributeError):
         pass
 
-    # [修复4] 使用更具唯一性的环境变量名 APP_RUN_MODE，
-    # 避免与 Hugging Face 平台自身注入的 HG 前缀变量冲突
-    # 在 HF Space 的 Settings -> Variables 中设置 APP_RUN_MODE=server
     run_mode = os.getenv('APP_RUN_MODE', '').lower()
-
-    # 同时保留对旧版 HG=true 的兼容，方便平滑迁移
     hg_mode = os.getenv('HG', '').lower()
 
     if run_mode == 'server' or hg_mode == 'true':
