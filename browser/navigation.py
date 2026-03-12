@@ -14,35 +14,34 @@ def handle_popup_dialog(page: Page, logger=None):
     交替点击 Got it 和 Continue to the app 按钮直到没有弹窗。
     """
     logger.info("开始处理弹窗...")
-    
+
     # 定义需要查找的按钮列表
     button_names = ["Got it", "Continue to the app"]
     max_iterations = 10  # 最多尝试10轮，防止死循环
     total_clicks = 0
-    
+
     try:
         for iteration in range(max_iterations):
             clicked_in_round = False
-            
+
             # 等待页面稳定
             time.sleep(1)
-            
+
             # 每轮交替尝试点击所有按钮
             for button_name in button_names:
                 try:
                     button_locator = page.locator(f'button:visible:has-text("{button_name}")')
                     if button_locator.count() > 0 and button_locator.first.is_visible():
-                        # logger.info(f"检测到弹窗: 点击 '{button_name}'")
                         button_locator.first.click(force=True, timeout=2000)
                         total_clicks += 1
                         clicked_in_round = True
                         time.sleep(1)
                 except:
                     pass
-            
+
             if not clicked_in_round:
                 break
-        
+
         if total_clicks > 0:
             logger.info(f"弹窗处理完成, 共点击 {total_clicks} 次")
         else:
@@ -55,7 +54,7 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
     在成功导航到目标页面后，执行后续操作（处理弹窗、保持运行）。
     """
     logger.info("已成功到达目标页面")
-    page.click('body') # 给予页面焦点
+    page.click('body')  # 给予页面焦点
 
     # 检查并处理弹窗
     handle_popup_dialog(page, logger=logger)
@@ -74,7 +73,6 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
 
     if cookie_validator:
         logger.info("Cookie验证器已创建，将定期验证Cookie有效性")
-
     logger.info("实例将保持运行状态。每10秒点击一次页面以保持活动")
 
     # 等待页面加载和渲染
@@ -86,7 +84,6 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
 
     # 添加Cookie验证计数器
     click_counter = 0
-
     while True:
         # 检查是否收到关闭信号
         if shutdown_event and shutdown_event.is_set():
@@ -105,24 +102,26 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
             current_ws_status = get_ws_status(page, logger)
             if current_ws_status != last_ws_status:
                 logger.warning(f"WS状态变更: {last_ws_status} -> {current_ws_status}")
-                
+
                 # 如果不是CONNECTED状态，尝试重连
                 if current_ws_status != "CONNECTED":
                     logger.info("WS断开，尝试重连...")
-                    reconnect_ws(page, logger)
-                    current_ws_status = get_ws_status(page, logger)
-                    logger.info(f"重连后WS状态: {current_ws_status}")
-                
+                    try:
+                        reconnect_ws(page, logger)
+                        current_ws_status = get_ws_status(page, logger)
+                        logger.info(f"重连后WS状态: {current_ws_status}")
+                    except Exception as reconnect_e:
+                        # 重连时 page 可能已关闭，直接触发重启
+                        raise KeepAliveError(f"WS重连时出错（页面可能已关闭）: {reconnect_e}")
+
                 last_ws_status = current_ws_status
 
             # 每360次点击（1小时）执行一次完整的Cookie验证
             if cookie_validator and click_counter >= 360:  # 360 * 10秒 = 3600秒 = 1小时
                 is_valid = cookie_validator.validate_cookies_in_main_thread()
-
                 if not is_valid:
                     cookie_validator.shutdown_instance_on_cookie_failure()
                     return
-
                 click_counter = 0  # 重置计数器
 
             # 使用可中断的睡眠，每秒检查一次关闭信号
@@ -132,15 +131,21 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
                     return
                 time.sleep(1)
 
+        except KeepAliveError:
+            # KeepAliveError 直接向上传递，不重复包装
+            raise
         except Exception as e:
             logger.error(f"在保持活动循环中出错: {e}")
-            # 在保持活动循环中出错时截屏
+            # 截图单独保护，失败不影响后续流程
             try:
                 screenshot_dir = logs_dir()
                 ensure_dir(screenshot_dir)
-                screenshot_filename = os.path.join(screenshot_dir, f"FAIL_keep_alive_error_{cookie_file_config}.png")
+                screenshot_filename = os.path.join(
+                    screenshot_dir, f"FAIL_keep_alive_error_{cookie_file_config}.png"
+                )
                 page.screenshot(path=screenshot_filename, full_page=True)
                 logger.info(f"已在保持活动循环出错时截屏: {screenshot_filename}")
             except Exception as screenshot_e:
-                logger.error(f"在保持活动循环出错时截屏失败: {screenshot_e}")
+                logger.warning(f"截屏失败（页面可能已关闭），跳过: {screenshot_e}")
+            # 无论截图成功与否，都必须抛出 KeepAliveError 触发浏览器重启
             raise KeepAliveError(f"在保持活动循环时出错: {e}")
